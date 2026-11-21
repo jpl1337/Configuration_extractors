@@ -10,53 +10,19 @@ env:
   PINS_BRANCH: fix/python-3.14-pins
 
 jobs:
-  parser-imports:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        pins: [stock, fixed]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch parser source
-        run: |
-          if [ "${{ matrix.pins }}" = fixed ]; then
-            git clone -q --depth 1 -b "$PINS_BRANCH" "$PINS_REPO" /tmp/rp95
-          else
-            git clone -q --depth 1 https://github.com/cccs-rs/Configuration_extractors.git /tmp/rp95
-          fi
-          chmod -R a+rwX /tmp/rp95
-      - name: Import every extractor
-        run: |
-          docker run --rm -v /tmp/rp95:/src:ro -v "$PWD/.ci":/h:ro --entrypoint sh "$IMAGE" /h/import_extractors.sh /src
-      - name: Full output for the clr extractors
-        run: |
-          for f in metastealer_config_extractor.py whitesnake_config_extractor_rc4_obfuscated.py xtea_decrypt.py; do
-            echo "::group::$f"
-            docker run --rm -v /tmp/rp95:/src:ro -v "$PWD/.ci":/h:ro --entrypoint sh "$IMAGE" /h/one_extractor.sh /src "$f" | tail -15
-            echo "::endgroup::"
-          done
-
   service-load:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        maco: [stock, patched]
         pins: [stock, fixed]
     steps:
       - uses: actions/checkout@v4
       - name: Build image
         run: |
-          if [ "${{ matrix.maco }}" = patched ]; then
-            printf 'FROM %s\nUSER assemblyline\nRUN SETUPTOOLS_SCM_PRETEND_VERSION=1.4.0 pip install --no-cache-dir --user --no-deps %s\n' "$IMAGE" "$MACO_PATCH_ZIP" > Dockerfile.cx
-          else
-            printf 'FROM %s\n' "$IMAGE" > Dockerfile.cx
-          fi
+          printf 'FROM %s\n' "$IMAGE" > Dockerfile.cx
           docker build -q -t cxtest -f Dockerfile.cx .
-          docker run --rm --entrypoint python cxtest -c "import maco.utils as u, inspect; print('maco import_timeout param:', 'import_timeout' in inspect.signature(u.register_extractors).parameters)"
       - name: Fetch the four default sources
         run: |
           S=/tmp/cxw/src; mkdir -p $S
@@ -73,15 +39,12 @@ jobs:
         run: |
           docker run --rm -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint python cxtest /h/cx_load.py install \
             /tmp/cxw/src/CAPE_PARSERS /tmp/cxw/src/RussianPanda95 /tmp/cxw/src/RatKingParser /tmp/cxw/src/SEKOIA 2>&1 | tail -5
-      - name: Load like the service under a 1 GiB cap
+      - name: Load like the service, 1 GiB, CPU unlimited vs 1 CPU
         run: |
-          docker run --name cxload --memory=1g --memory-swap=1g -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint sh cxtest -c '
-            python /h/cx_load.py load /tmp/cxw/src/CAPE_PARSERS /tmp/cxw/src/RussianPanda95 /tmp/cxw/src/RatKingParser /tmp/cxw/src/SEKOIA > /tmp/out.log 2>&1
-            echo "PY_EXIT=$?"
-            grep -c "exceeded" /tmp/out.log | sed "s/^/TIMEOUT_LINES=/"
-            grep -E "CX_RESULT|exceeded|Killed" /tmp/out.log | tail -12
-            echo "MEM_PEAK_MIB=$(( $(cat /sys/fs/cgroup/memory.peak) / 1048576 ))"
-            grep -E "^oom_kill " /sys/fs/cgroup/memory.events | sed "s/^/CGROUP_/"
-          ' || true
-          echo "CONTAINER $(docker inspect cxload --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}')"
-          docker rm -f cxload >/dev/null
+          for cpus in unlimited 1; do
+            echo "======== cpus=$cpus mem=1g"
+            flag=""; [ "$cpus" != unlimited ] && flag="--cpus=$cpus"
+            docker run --name cxload $flag --memory=1g --memory-swap=1g -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint sh cxtest /h/measured_load.sh || true
+            echo "CONTAINER $(docker inspect cxload --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}')"
+            docker rm -f cxload >/dev/null
+          done
