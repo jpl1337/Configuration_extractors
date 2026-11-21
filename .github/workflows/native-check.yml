@@ -17,11 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         pins: [stock, fixed]
+        method: [tarfile, subprocess]
     steps:
       - uses: actions/checkout@v4
       - name: Build image
         run: |
-          printf 'FROM %s\n' "$IMAGE" > Dockerfile.cx
+          printf 'FROM %s\nUSER root\nRUN apt-get update -qq && apt-get install -y -qq --no-install-recommends zstd && rm -rf /var/lib/apt/lists/*\nUSER assemblyline\n' "$IMAGE" > Dockerfile.cx
           docker build -q -t cxtest -f Dockerfile.cx .
       - name: Fetch the four default sources
         run: |
@@ -39,12 +40,14 @@ jobs:
         run: |
           docker run --rm -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint python cxtest /h/cx_load.py install \
             /tmp/cxw/src/CAPE_PARSERS /tmp/cxw/src/RussianPanda95 /tmp/cxw/src/RatKingParser /tmp/cxw/src/SEKOIA 2>&1 | tail -5
-      - name: Load like the service, 1 GiB, CPU unlimited vs 1 CPU
+      - name: Bundle sources like the 4.8 updater
         run: |
-          for cpus in unlimited 1; do
-            echo "======== cpus=$cpus mem=1g"
-            flag=""; [ "$cpus" != unlimited ] && flag="--cpus=$cpus"
-            docker run --name cxload $flag --memory=1g --memory-swap=1g -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint sh cxtest /h/measured_load.sh || true
+          docker run --rm -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint python cxtest /h/make_bundles.py /tmp/cxw/src /tmp/cxw/bundles
+      - name: Extract in the service process, then reload (1 CPU)
+        run: |
+          for mem in 1g 4g; do
+            echo "======== method=${{ matrix.method }} pins=${{ matrix.pins }} cpus=1 mem=$mem"
+            docker run --name cxload --cpus=1 --memory=$mem --memory-swap=$mem -v /tmp/cxw:/tmp/cxw -v "$PWD/.ci":/h:ro --entrypoint sh cxtest /h/measured_extract.sh ${{ matrix.method }} || true
             echo "CONTAINER $(docker inspect cxload --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}')"
             docker rm -f cxload >/dev/null
           done
